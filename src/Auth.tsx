@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { supabase } from './lib/supabase'
 
 export default function Auth() {
@@ -9,16 +9,77 @@ export default function Auth() {
   const [loading, setLoading] = useState(false)
   const [ok, setOk] = useState(false)
 
+  // ── Detecta quando usuário clica no link do email de confirmação ─────────
+  // O Supabase redireciona com #access_token= na URL ou ?token_hash=
+  useEffect(() => {
+    // Método 1: hash fragment (#access_token=...) — versão antiga do Supabase
+    const hash = window.location.hash
+    if (hash && hash.includes('access_token')) {
+      supabase.auth.getSession().then(({ data }) => {
+        if (data.session) window.location.replace('/')
+      })
+      return
+    }
+
+    // Método 2: query params (?token_hash=...&type=email) — versão nova PKCE
+    const params = new URLSearchParams(window.location.search)
+    const tokenHash = params.get('token_hash')
+    const type = params.get('type')
+
+    if (tokenHash && type) {
+      setLoading(true)
+      supabase.auth.verifyOtp({ token_hash: tokenHash, type: type as any })
+        .then(({ error }) => {
+          if (!error) {
+            // Limpa a URL e deixa o App.tsx detectar a sessão
+            window.history.replaceState({}, '', '/')
+            window.location.reload()
+          } else {
+            setErro('Link expirado ou inválido. Tente fazer login.')
+            setLoading(false)
+          }
+        })
+    }
+  }, [])
+
   const entrar = async () => {
     if (!email || !senha) { setErro('Preencha todos os campos'); return }
     setLoading(true); setErro('')
     const { error } = modo === 'login'
       ? await supabase.auth.signInWithPassword({ email, password: senha })
-      : await supabase.auth.signUp({ email, password: senha })
+      : await supabase.auth.signUp({
+          email,
+          password: senha,
+          options: {
+            // URL para redirecionar após confirmar o email
+            emailRedirectTo: window.location.origin
+          }
+        })
     if (error) setErro(error.message)
     else if (modo === 'cadastro') setOk(true)
     setLoading(false)
   }
+
+  // Tela de carregando enquanto processa o link do email
+  if (loading && !email) return (
+    <div style={{
+      minHeight: '100vh', background: '#0a0e1a',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      flexDirection: 'column', gap: 16
+    }}>
+      <div style={{
+        width: 56, height: 56, borderRadius: 16,
+        background: 'linear-gradient(135deg,#6366f1,#10b981)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        fontSize: 28, fontWeight: 'bold', color: '#fff',
+        animation: 'pulse 1.5s infinite'
+      }}>F</div>
+      <p style={{ color: 'rgba(255,255,255,0.5)', fontSize: 14, margin: 0 }}>
+        Verificando email...
+      </p>
+      <style>{`@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}`}</style>
+    </div>
+  )
 
   return (
     <div style={{
@@ -45,9 +106,25 @@ export default function Auth() {
         </div>
 
         {ok ? (
-          <div style={{ textAlign: 'center', color: '#10b981' }}>
-            <div style={{ fontSize: 40, marginBottom: 12 }}>✓</div>
-            <p style={{ margin: 0, fontSize: 15 }}>Verifique seu e-mail para confirmar o cadastro.</p>
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: 48, marginBottom: 16 }}>📧</div>
+            <p style={{ margin: '0 0 8px', fontSize: 16, fontWeight: 700, color: '#fff' }}>
+              Confirme seu e-mail!
+            </p>
+            <p style={{ margin: '0 0 20px', fontSize: 14, color: 'rgba(255,255,255,0.5)', lineHeight: 1.5 }}>
+              Enviamos um link para <strong style={{ color: '#6366f1' }}>{email}</strong>.
+              Clique nele e você entrará automaticamente.
+            </p>
+            <button
+              onClick={() => { setOk(false); setModo('login') }}
+              style={{
+                padding: '10px 24px', border: '1px solid rgba(255,255,255,0.12)',
+                borderRadius: 10, cursor: 'pointer', background: 'rgba(255,255,255,0.06)',
+                color: 'rgba(255,255,255,0.6)', fontSize: 13, fontWeight: 600
+              }}
+            >
+              Já confirmei → Fazer login
+            </button>
           </div>
         ) : (
           <>
@@ -85,7 +162,11 @@ export default function Auth() {
                 />
               </div>
 
-              {erro && <p style={{ margin: 0, fontSize: 13, color: '#f87171', background: 'rgba(239,68,68,0.1)', padding: '8px 12px', borderRadius: 8 }}>{erro}</p>}
+              {erro && (
+                <p style={{ margin: 0, fontSize: 13, color: '#f87171', background: 'rgba(239,68,68,0.1)', padding: '8px 12px', borderRadius: 8 }}>
+                  {erro}
+                </p>
+              )}
 
               <button onClick={entrar} disabled={loading} style={{
                 padding: '13px', border: 'none', borderRadius: 12, cursor: loading ? 'not-allowed' : 'pointer',
@@ -100,7 +181,10 @@ export default function Auth() {
           </>
         )}
       </div>
-      <style>{`input::placeholder{color:rgba(255,255,255,0.2)!important}input:focus{border-color:rgba(99,102,241,0.6)!important;box-shadow:0 0 0 3px rgba(99,102,241,0.15)!important}`}</style>
+      <style>{`
+        input::placeholder { color: rgba(255,255,255,0.2) !important }
+        input:focus { border-color: rgba(99,102,241,0.6) !important; box-shadow: 0 0 0 3px rgba(99,102,241,0.15) !important }
+      `}</style>
     </div>
   )
 }
