@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, useRef } from 'react'
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { supabase } from './lib/supabase'
 
 // ─── TIPOS ───────────────────────────────────────────────────────────────────
@@ -303,7 +303,44 @@ export default function Dashboard({userId,userEmail}:Props) {
   const [fO,setFO]=useState(fOBase)
   const [fCfg,setFCfg]=useState({...D.config})
 
-  const salvar = useCallback((d:Dados)=>{setD(d);localStorage.setItem(chave,JSON.stringify(d))},[chave])
+  // ── Persistência na nuvem (Supabase) + localStorage como cache ──────────
+  const [sincronizado, setSincronizado] = useState(false)
+  const [salvando, setSalvando] = useState(false)
+
+  // Carrega dados do Supabase ao iniciar
+  useEffect(() => {
+    const carregar = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('financehub_data')
+          .select('dados')
+          .eq('user_id', userId)
+          .single()
+        if (data?.dados && !error) {
+          const dadosNuvem = { ...DADOS_INICIAIS, ...data.dados, config: { ...DADOS_INICIAIS.config, ...data.dados?.config } }
+          setD(dadosNuvem)
+          localStorage.setItem(chave, JSON.stringify(dadosNuvem))
+        }
+      } catch (e) {
+        // Usa localStorage como fallback
+      }
+      setSincronizado(true)
+    }
+    carregar()
+  }, [userId])
+
+  const salvar = useCallback((d: Dados) => {
+    // Salva localmente primeiro (instantâneo)
+    setD(d)
+    localStorage.setItem(chave, JSON.stringify(d))
+    // Salva na nuvem (assíncrono, sem travar a UI)
+    setSalvando(true)
+    supabase
+      .from('financehub_data')
+      .upsert({ user_id: userId, dados: d, updated_at: new Date().toISOString() }, { onConflict: 'user_id' })
+      .then(() => setSalvando(false))
+      .catch(() => setSalvando(false))
+  }, [chave, userId])
 
   // ── Cálculos ──────────────────────────────────────────────────────────────
   const gastosMes = useMemo(()=>D.gastos_var.filter(g=>g.data?.startsWith(mes)),[D.gastos_var,mes])
@@ -343,7 +380,18 @@ export default function Dashboard({userId,userEmail}:Props) {
   // ── CRUD ──────────────────────────────────────────────────────────────────
   const addC=()=>{if(!fC.nome)return;const info=BANDEIRA_CORES[fC.bandeira]||BANDEIRA_CORES['Outros'];salvar({...D,cartoes:[...D.cartoes,{...fC,id:uuid(),limite:parseMoeda(fC.limite),cor:info.bg}]});setMCartao(false);setFC(fCBase)}
   const editC=(item:any)=>{setEditItem(item);setFC({nome:item.nome,bandeira:item.bandeira,numero:item.numero,limite:String(item.limite),vencimento:item.vencimento,membroId:item.membroId});setMCartao(true)}
-  const saveC=()=>{if(!fC.nome)return;const info=BANDEIRA_CORES[fC.bandeira]||BANDEIRA_CORES['Outros'];if(editItem){salvar({...D,cartoes:D.cartoes.map(c=>c.id===editItem.id?{...c,...fC,limite:parseMoeda(fC.limite),cor:info.bg}:c)});setEditItem(null)}else addC();setMCartao(false);setFC(fCBase)}
+  const saveC=()=>{
+    if(!fC.nome) return
+    const info=BANDEIRA_CORES[fC.bandeira]||BANDEIRA_CORES['Outros']
+    if(editItem){
+      salvar({...D,cartoes:D.cartoes.map(c=>c.id===editItem.id?{...c,...fC,limite:parseMoeda(fC.limite),cor:info.bg}:c)})
+      setEditItem(null)
+    } else {
+      salvar({...D,cartoes:[...D.cartoes,{...fC,id:uuid(),limite:parseMoeda(fC.limite),cor:info.bg}]})
+    }
+    setMCartao(false)
+    setFC(fCBase)
+  }
   const delC=(id:string)=>salvar({...D,cartoes:D.cartoes.filter(c=>c.id!==id)})
 
   const addG=()=>{
@@ -361,21 +409,57 @@ export default function Dashboard({userId,userEmail}:Props) {
   const togFx=(id:string)=>salvar({...D,gastos_fix:D.gastos_fix.map(g=>g.id===id?{...g,pago:!g.pago}:g)})
   const delFx=(id:string)=>salvar({...D,gastos_fix:D.gastos_fix.filter(g=>g.id!==id)})
 
-  // ENTRADA: recorrente só se marcado explicitamente
-  const addE=()=>{if(!fE.descricao||!fE.valor)return;const nova={...fE,id:uuid(),valor:parseMoeda(fE.valor),recorrente:!!fE.recorrente,mes:fE.recorrente?undefined:fE.mes};salvar({...D,entradas:[...D.entradas,nova]});setMEntrada(false);setFE(fEBase)}
-  const editE=(item:any)=>{setEditItem(item);setFE({descricao:item.descricao,valor:String(item.valor),tipo:item.tipo,membroId:item.membroId,recorrente:!!item.recorrente,mes:item.mes||mesAtual()});setMEntrada(true)}
-  const saveE=()=>{if(!fE.descricao||!fE.valor)return;const upd={...fE,valor:parseMoeda(fE.valor),recorrente:!!fE.recorrente,mes:fE.recorrente?undefined:fE.mes};if(editItem){salvar({...D,entradas:D.entradas.map(e=>e.id===editItem.id?{...e,...upd}:e)});setEditItem(null)}else{salvar({...D,entradas:[...D.entradas,{...upd,id:uuid()}]});}setMEntrada(false);setFE(fEBase)}
+  // ENTRADA: recorrente só se marcado explicitamente — sem duplicação
+  const editE=(item:any)=>{
+    setEditItem(item)
+    setFE({descricao:item.descricao,valor:String(item.valor),tipo:item.tipo,membroId:item.membroId,recorrente:!!item.recorrente,mes:item.mes||mesAtual()})
+    setMEntrada(true)
+  }
+  const saveE=()=>{
+    if(!fE.descricao||!fE.valor) return
+    const upd = {...fE, valor:parseMoeda(fE.valor), recorrente:!!fE.recorrente, mes:fE.recorrente?undefined:fE.mes}
+    if(editItem) {
+      // Editar existente
+      salvar({...D, entradas:D.entradas.map(e=>e.id===editItem.id ? {...e,...upd} : e)})
+    } else {
+      // Criar nova — apenas aqui, sem chamar addE
+      salvar({...D, entradas:[...D.entradas, {...upd, id:uuid()}]})
+    }
+    setEditItem(null)
+    setMEntrada(false)
+    setFE(fEBase)
+  }
   const delE=(id:string)=>salvar({...D,entradas:D.entradas.filter(e=>e.id!==id)})
 
   const addM=()=>{if(!fM.descricao||!fM.valor)return;salvar({...D,metas:[...D.metas,{...fM,id:uuid(),valor:parseMoeda(fM.valor)}]});setMMeta(false);setFM(fMBase)}
   const editM=(item:any)=>{setEditItem(item);setFM({descricao:item.descricao,valor:String(item.valor),prazo:item.prazo,cor:item.cor,tipo:item.tipo||'meta'});setMMeta(true)}
-  const saveM=()=>{if(!fM.descricao||!fM.valor)return;if(editItem){salvar({...D,metas:D.metas.map(m=>m.id===editItem.id?{...m,...fM,valor:parseMoeda(fM.valor)}:m)});setEditItem(null)}else addM();setMMeta(false);setFM(fMBase)}
+  const saveM=()=>{
+    if(!fM.descricao||!fM.valor) return
+    if(editItem){
+      salvar({...D,metas:D.metas.map(m=>m.id===editItem.id?{...m,...fM,valor:parseMoeda(fM.valor)}:m)})
+      setEditItem(null)
+    } else {
+      salvar({...D,metas:[...D.metas,{...fM,id:uuid(),valor:parseMoeda(fM.valor)}]})
+    }
+    setMMeta(false)
+    setFM(fMBase)
+  }
   const delM=(id:string)=>salvar({...D,metas:D.metas.filter(m=>m.id!==id)})
 
   // RESERVA: vinculada a meta, abate no valor correspondente
   const addR=()=>{if(!fR.valor)return;salvar({...D,reservas:[...D.reservas,{...fR,id:uuid(),valor:parseMoeda(fR.valor),descricao:fR.descricao||'Reserva'}]});setMReserva(false);setFR(fRBase)}
   const editR=(item:any)=>{setEditItem(item);setFR({descricao:item.descricao,valor:String(item.valor),metaId:item.metaId||'',data:item.data,membroId:item.membroId});setMReserva(true)}
-  const saveR=()=>{if(!fR.valor)return;if(editItem){salvar({...D,reservas:D.reservas.map(r=>r.id===editItem.id?{...r,...fR,valor:parseMoeda(fR.valor)}:r)});setEditItem(null)}else addR();setMReserva(false);setFR(fRBase)}
+  const saveR=()=>{
+    if(!fR.valor) return
+    if(editItem){
+      salvar({...D,reservas:D.reservas.map(r=>r.id===editItem.id?{...r,...fR,valor:parseMoeda(fR.valor)}:r)})
+      setEditItem(null)
+    } else {
+      salvar({...D,reservas:[...D.reservas,{...fR,id:uuid(),valor:parseMoeda(fR.valor),descricao:fR.descricao||'Reserva'}]})
+    }
+    setMReserva(false)
+    setFR(fRBase)
+  }
   const delR=(id:string)=>salvar({...D,reservas:D.reservas.filter(r=>r.id!==id)})
 
   const addMb=()=>{if(!fMb.nome)return;salvar({...D,membros:[...D.membros,{...fMb,id:uuid(),avatar:fMb.nome[0].toUpperCase()}]});setMMembro(false);setFMb(fMbBase)}
